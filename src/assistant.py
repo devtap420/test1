@@ -2,8 +2,12 @@ import datetime
 import json
 import os
 import subprocess
+import sys
 
 import requests
+
+# Windows consoles often default to cp1252, which can't print weather symbols etc.
+sys.stdout.reconfigure(encoding="utf-8")
 
 # Step 1: read the API key from our config file
 with open("config/api_key.txt", "r") as f:
@@ -53,6 +57,65 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web and return a short summary of the top result",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for, e.g. python tutorial",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather conditions for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City name, e.g. Chennai, London, New York",
+                    }
+                },
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_note",
+            "description": "Save a note for the user, with a timestamp, to notes.txt",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "The text of the note to save",
+                    }
+                },
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_running_apps",
+            "description": "List the applications currently open on the user's computer (apps with visible windows, not background processes)",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -95,10 +158,58 @@ def close_app(app_name):
     return f"Closed {app_name}"
 
 
+def search_web(query):
+    # DuckDuckGo instant answer API - free, no key needed
+    response = requests.get(
+        "https://api.duckduckgo.com/",
+        params={"q": query, "format": "json", "no_html": 1},
+    )
+    result = response.json()
+    if result.get("AbstractText"):
+        return result["AbstractText"]
+    # no direct abstract - fall back to the first related topic
+    for topic in result.get("RelatedTopics", []):
+        if isinstance(topic, dict) and topic.get("Text"):
+            return topic["Text"]
+    return f"No instant answer found for '{query}'"
+
+
+def get_weather(city):
+    # wttr.in - free weather service, no key needed; format=3 gives a one-liner
+    response = requests.get(f"https://wttr.in/{city}", params={"format": "3"})
+    return response.text.strip()
+
+
+def take_note(note):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open("notes.txt", "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {note}\n")
+    return f"Note saved: {note}"
+
+
+def list_running_apps():
+    # only processes with a visible window title = actual apps, not background stuff
+    script = (
+        'Get-Process | Where-Object { $_.MainWindowTitle -ne "" } '
+        "| Select-Object -ExpandProperty ProcessName -Unique"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True,
+        text=True,
+    )
+    apps = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return ", ".join(apps) if apps else "No apps with open windows found"
+
+
 TOOL_IMPLEMENTATIONS = {
     "open_app": open_app,
     "get_time": get_time,
     "close_app": close_app,
+    "search_web": search_web,
+    "get_weather": get_weather,
+    "take_note": take_note,
+    "list_running_apps": list_running_apps,
 }
 
 # Step 3: chat loop - prompt, send to Nemotron, act on the reply, repeat
