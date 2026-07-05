@@ -354,49 +354,77 @@ TOOL_IMPLEMENTATIONS = {
     "set_reminder": set_reminder,
 }
 
-# Step 3: chat loop - prompt, send to Nemotron, act on the reply, repeat
+# Step 3: talking to Nemotron
 url = "https://openrouter.ai/api/v1/chat/completions"
 headers = {
     "Authorization": f"Bearer {api_key}",
     "Content-Type": "application/json",
 }
+MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 
-conversation_history = []
 
-while True:
-    user_input = input("You: ")
-    if user_input.lower() in ("quit", "exit"):
-        break
+def chat_api_call(messages, model=MODEL):
+    """Send the conversation to Nemotron. Returns (message, error) - one is None."""
+    data = {"model": model, "messages": messages, "tools": tools}
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=60)
+        result = response.json()
+    except requests.exceptions.RequestException as e:
+        return None, f"Network error: {e}"
+    except ValueError:
+        return None, f"API returned invalid response (HTTP {response.status_code})"
 
-    conversation_history.append({"role": "user", "content": user_input})
+    if "choices" not in result:
+        error = result.get("error", {})
+        return None, f"API error: {error.get('message', result)}"
 
-    data = {
-        "model": "nvidia/nemotron-3-super-120b-a12b:free",
-        "messages": conversation_history,
-        "tools": tools,
-    }
+    return result["choices"][0]["message"], None
 
-    response = requests.post(url, headers=headers, json=data)
-    result = response.json()
-    message = result["choices"][0]["message"]
-    conversation_history.append(message)
 
-    # if the model asked to call a tool, run it; otherwise print its text reply
-    tool_calls = message.get("tool_calls")
-    if tool_calls:
-        for call in tool_calls:
-            function_name = call["function"]["name"]
-            arguments = json.loads(call["function"]["arguments"])
-            implementation = TOOL_IMPLEMENTATIONS[function_name]
-            output = implementation(**arguments)
-            print(output)
-            conversation_history.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "name": function_name,
-                    "content": str(output),
-                }
-            )
-    else:
-        print(message["content"])
+def execute_tool_call(call):
+    """Run one tool call from the model, returning its output string."""
+    function_name = call["function"]["name"]
+    arguments = json.loads(call["function"]["arguments"])
+    implementation = TOOL_IMPLEMENTATIONS[function_name]
+    return implementation(**arguments)
+
+
+# Step 4: terminal chat loop - prompt, send to Nemotron, act on the reply, repeat
+def main():
+    conversation_history = []
+
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ("quit", "exit"):
+            break
+
+        conversation_history.append({"role": "user", "content": user_input})
+
+        message, error = chat_api_call(conversation_history)
+        if error:
+            print(error)
+            conversation_history.pop()  # drop the failed turn so a retry starts clean
+            continue
+
+        conversation_history.append(message)
+
+        # if the model asked to call a tool, run it; otherwise print its text reply
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            for call in tool_calls:
+                output = execute_tool_call(call)
+                print(output)
+                conversation_history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "name": call["function"]["name"],
+                        "content": str(output),
+                    }
+                )
+        else:
+            print(message["content"])
+
+
+if __name__ == "__main__":
+    main()
