@@ -3,3 +3,4 @@ config/api_key.txt
 __pycache__/
 *.pyc
 notes.txt
+screenshots/
