@@ -46,7 +46,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "close_app",
-            "description": "Close a running application on the user's Windows computer",
+            "description": (
+                "Force-close an ENTIRE application and all its windows on the user's "
+                "Windows computer. Do NOT use this to close a single website or browser "
+                "tab - use close_browser_tab for that."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -56,6 +60,27 @@ tools = [
                     }
                 },
                 "required": ["app_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_browser_tab",
+            "description": (
+                "Close a single tab in the user's browser (Chrome/Edge) whose page title "
+                "or site name matches a keyword, leaving the rest of the browser open. "
+                "Use this when the user asks to close a website, e.g. 'close youtube'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_keyword": {
+                        "type": "string",
+                        "description": "Word from the tab's title or site name, e.g. youtube, gmail, reddit",
+                    }
+                },
+                "required": ["title_keyword"],
             },
         },
     },
@@ -231,6 +256,25 @@ def close_app(app_name):
     return f"Closed {app_name}"
 
 
+def close_browser_tab(title_keyword):
+    from pywinauto import Desktop
+
+    # tab titles show the page name ("YouTube"), not the domain ("youtube.com"),
+    # so match on the part before the first dot too
+    keywords = {title_keyword.lower(), title_keyword.lower().split(".")[0]}
+
+    # Chrome, Edge and other Chromium browsers all use this window class
+    for window in Desktop(backend="uia").windows(class_name="Chrome_WidgetWin_1"):
+        for tab in window.descendants(control_type="TabItem"):
+            tab_title = tab.window_text().lower()
+            if any(k and k in tab_title for k in keywords):
+                tab.select()  # bring the tab to the front so Ctrl+W hits it
+                window.set_focus()
+                window.type_keys("^w")
+                return f"Closed the '{tab.window_text()}' tab"
+    return f"No open browser tab matching '{title_keyword}' was found"
+
+
 def search_web(query):
     # DuckDuckGo instant answer API - free, no key needed
     response = requests.get(
@@ -343,6 +387,7 @@ TOOL_IMPLEMENTATIONS = {
     "open_app": open_app,
     "get_time": get_time,
     "close_app": close_app,
+    "close_browser_tab": close_browser_tab,
     "search_web": search_web,
     "get_weather": get_weather,
     "take_note": take_note,
@@ -375,8 +420,24 @@ def chat_api_call(messages, model=MODEL):
         return None, f"API returned invalid response (HTTP {response.status_code})"
 
     if "choices" not in result:
+        # keep the complete response body - OpenRouter puts the real upstream
+        # error in error.metadata.raw, not in error.message
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/api_errors.log", "a", encoding="utf-8") as f:
+            timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+            f.write(f"[{timestamp}] HTTP {response.status_code} model={model} "
+                    f"{json.dumps(result, ensure_ascii=False)}\n")
+
         error = result.get("error", {})
-        return None, f"API error: {error.get('message', result)}"
+        parts = [f"API error (HTTP {response.status_code}): {error.get('message', result)}"]
+        if error.get("code"):
+            parts.append(f"code={error['code']}")
+        metadata = error.get("metadata") or {}
+        if metadata.get("provider_name"):
+            parts.append(f"provider={metadata['provider_name']}")
+        if metadata.get("raw"):
+            parts.append(f"upstream said: {metadata['raw']}")
+        return None, " | ".join(parts)
 
     return result["choices"][0]["message"], None
 
